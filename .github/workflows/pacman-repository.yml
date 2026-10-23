@@ -1,0 +1,89 @@
+name: Pacman repository
+
+on:
+  release:
+    types: [published]
+  # Releases uploaded with GITHUB_TOKEN do not fire another release event.
+  workflow_run:
+    workflows: [Linux release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pacman-repository
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'release' && !github.event.release.prerelease && !github.event.release.draft) ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install packaging tools
+        run: |
+          pacman -Sy --noconfirm --needed archlinux-keyring
+          pacman -Su --noconfirm --needed
+          pacman -S --noconfirm --needed base-devel git github-cli jq
+          useradd --create-home builder
+
+      # workflow_run always uses the trusted default-branch packaging code.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download and verify the latest stable release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Resolve the latest release at execution time so an older queued
+          # event cannot replace the repository with an earlier version.
+          tag=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          archive="omarchyuu-${tag#v}-x86_64-linux.tar.zst"
+          gh release download "$tag" -R "$GITHUB_REPOSITORY" --pattern "$archive" --dir download
+          assets=$(gh release view "$tag" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          if grep -Fxq "$archive.sha256" <<< "$assets"; then
+            sums="$archive.sha256"
+          else
+            sums=SHA256SUMS
+          fi
+          gh release download "$tag" -R "$GITHUB_REPOSITORY" --pattern "$sums" --dir download
+          cd download
+          awk -v file="$archive" '$2 == file || $2 == "*" file { print }' "$sums" > archive.sha256
+          [[ $(wc -l < archive.sha256) -eq 1 ]]
+          sha256sum --check archive.sha256
+          printf 'RELEASE_ARCHIVE=%s\n' "$archive" >> "$GITHUB_ENV"
+
+      - name: Build the package and repository database
+        shell: bash
+        run: |
+          mkdir site
+          chown builder:builder site
+          runuser -u builder -- bash packaging/pacman/build-repository.sh \
+            "$PWD/download/$RELEASE_ARCHIVE" "$PWD/site"
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v5
+        id: deployment

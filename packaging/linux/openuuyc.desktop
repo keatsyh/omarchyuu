@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=omarchyuu
+GenericName=Remote Desktop
+GenericName[zh_CN]=远程桌面
+Comment=UU Remote desktop for Omarchy
+Comment[zh_CN]=Omarchy 的 UU 远程桌面客户端
+Exec=omarchyuu %u
+Icon=openuuyc
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;uu;远程;
+StartupNotify=true
+StartupWMClass=openuuyc
+MimeType=x-scheme-handler/uuremote;

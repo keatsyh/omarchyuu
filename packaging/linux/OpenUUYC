@@ -1,0 +1,3 @@
+#!/bin/sh
+# Compatibility command for existing services, shortcuts and terminal sessions.
+exec "$(dirname -- "$0")/omarchyuu" "$@"
