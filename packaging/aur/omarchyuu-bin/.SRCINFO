@@ -42,6 +42,6 @@ pkgbase = omarchyuu-bin
 	conflicts = openuuyc-git
 	options = !debug
 	source = https://github.com/keatsyh/omarchyuu/releases/download/v0.1.1/omarchyuu-0.1.1-x86_64-linux.tar.zst
-	sha256sums = 7247dea623e9564d563c223851189ee127773205001ce48d076ae24d67ae1ea6
+	sha256sums = 50c63ab5c3a5ac16249023f93aae2a61eb7a5e59f52e972f1c0a83e3d4c4f0a8
 
 pkgname = omarchyuu-bin
