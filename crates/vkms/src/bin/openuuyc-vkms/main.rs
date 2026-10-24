@@ -915,9 +915,13 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        // 写端关了：再读就是 EOF。
+        // 连接已关闭。对端若恰好在期限到来时仍在写，Unix 流也可能返回 reset。
         answer.clear();
-        assert_eq!(reader.read_line(&mut answer).unwrap(), 0);
+        match reader.read_line(&mut answer) {
+            Ok(0) => {}
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+            other => panic!("拒绝后的连接应已关闭：{other:?}"),
+        }
     }
 
     /// 一个 uid 占不满全部连接位；连接位还回去以后能再用。
