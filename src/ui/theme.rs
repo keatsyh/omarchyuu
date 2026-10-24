@@ -2,6 +2,19 @@
 //! Omarchy workspace: neutral canvas, terminal tabs, square controls and quiet surfaces.
 //! Layout is page-specific; palette, typography and control density live here.
 use egui::{Color32, FontId, Stroke};
+use std::{
+    cell::RefCell,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+const THEME_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+thread_local! {
+    // Each UI thread keeps one palette, shared by all its windows. Refresh only
+    // at pass boundaries so semantic colors and egui styles change together.
+    static PALETTE: RefCell<LivePalette> = RefCell::new(LivePalette::new(theme_paths()));
+}
 
 pub const BG: Color32 = Color32::from_rgb(24, 28, 29);
 pub const SIDEBAR: Color32 = Color32::from_rgb(19, 23, 24);
@@ -30,11 +43,10 @@ pub const VIEWER_SCRIM: Color32 = Color32::from_rgba_premultiplied(8, 10, 14, 23
 pub const CONNECTION_WALLPAPER_DIM: u8 = 166;
 pub const CONNECTION_WALLPAPER_DETAIL_DIM: u8 = 212;
 
-/// Resolve semantic UI tokens against Omarchy's active palette once per process.
+/// Resolve semantic UI tokens against the current UI thread's active palette.
 /// Protocol colors, textures, QR codes and annotation ink are deliberately untouched.
 pub fn color(token: Color32) -> Color32 {
-    static PALETTE: std::sync::LazyLock<Palette> = std::sync::LazyLock::new(Palette::load);
-    PALETTE.resolve(token)
+    PALETTE.with(|palette| palette.borrow().palette.resolve(token))
 }
 
 /// Pick a readable label on an arbitrary Omarchy accent, including light themes.
@@ -57,24 +69,71 @@ pub fn on_accent() -> Color32 {
     }
 }
 
+fn theme_paths() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    [
+        ("XDG_STATE_HOME", ".local/state"),
+        ("XDG_CONFIG_HOME", ".config"),
+    ]
+    .into_iter()
+    .filter_map(|(variable, fallback)| {
+        std::env::var_os(variable)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| home.as_ref().map(|path| path.join(fallback)))
+    })
+    .map(|base| base.join("omarchy/current/theme/colors.toml"))
+    .collect()
+}
+
+struct LivePalette {
+    paths: Vec<PathBuf>,
+    palette: Palette,
+    checked: Instant,
+    revision: u64,
+}
+
+impl LivePalette {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        let palette = Palette::read(&paths).unwrap_or_default();
+        Self {
+            paths,
+            palette,
+            checked: Instant::now(),
+            revision: 0,
+        }
+    }
+
+    fn refresh(&mut self, now: Instant) -> u64 {
+        if now.duration_since(self.checked) >= THEME_CHECK_INTERVAL {
+            self.checked = now;
+            // Read through the path every time: Omarchy may replace the current
+            // theme symlink, or rewrite colors without changing its timestamp.
+            if let Some(palette) = Palette::read(&self.paths)
+                && palette != self.palette
+            {
+                self.palette = palette;
+                self.revision += 1;
+            }
+        }
+        self.revision
+    }
+}
+
+#[derive(Default, PartialEq)]
 struct Palette {
     colors: std::collections::HashMap<String, Color32>,
 }
 impl Palette {
-    fn load() -> Self {
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let state = std::env::var_os("XDG_STATE_HOME")
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| home.as_ref().map(|p| p.join(".local/state")));
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| home.as_ref().map(|p| p.join(".config")));
-        let source = [state, config].into_iter().flatten().find_map(|base| {
-            std::fs::read_to_string(base.join("omarchy/current/theme/colors.toml")).ok()
-        });
-        Self::parse(source.as_deref().unwrap_or_default())
+    fn read(paths: &[PathBuf]) -> Option<Self> {
+        let source = paths
+            .iter()
+            .find_map(|path| std::fs::read_to_string(path).ok())?;
+        let palette = Self::parse(&source);
+        // Theme switches can briefly expose an empty or partially written file.
+        // Keep the last good palette until its basic canvas is available again.
+        (palette.colors.contains_key("background") && palette.colors.contains_key("foreground"))
+            .then_some(palette)
     }
     fn parse(source: &str) -> Self {
         let colors = source
@@ -320,6 +379,44 @@ pub fn typography(style: &mut egui::Style, height: f32) {
 }
 
 pub fn configure(ctx: &egui::Context) {
+    let revision = PALETTE.with(|palette| palette.borrow_mut().refresh(Instant::now()));
+    apply_style(ctx);
+    // egui registers each plugin type once, even if configure is called again.
+    ctx.add_plugin(ThemeRefresh { revision });
+}
+
+struct ThemeRefresh {
+    revision: u64,
+}
+
+impl egui::Plugin for ThemeRefresh {
+    fn debug_name(&self) -> &'static str {
+        "omarchy-theme"
+    }
+
+    fn on_begin_pass(&mut self, ui: &mut egui::Ui) {
+        let (revision, delay) = PALETTE.with(|palette| {
+            let mut palette = palette.borrow_mut();
+            let now = Instant::now();
+            let revision = palette.refresh(now);
+            (
+                revision,
+                THEME_CHECK_INTERVAL.saturating_sub(now.duration_since(palette.checked)),
+            )
+        });
+        if self.revision != revision {
+            self.revision = revision;
+            apply_style(ui.ctx());
+            // The root Ui was created before this hook. Update it too, so
+            // child controls use the new style in this very pass.
+            ui.set_style(ui.ctx().style_of(egui::Theme::Dark));
+        }
+        // Align idle windows with the shared palette's next check deadline.
+        ui.ctx().request_repaint_after(delay);
+    }
+}
+
+fn apply_style(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
     let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     style.visuals = egui::Visuals::dark();
@@ -404,6 +501,163 @@ pub const POINTER_RIGHT_CLICK: Color32 = AMBER;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DARK: &str = "background = \"#102030\"\nforeground = \"#e0e0e0\"\naccent = \"#88aaff\"\n";
+    const LIGHT: &str =
+        "background = \"#f0f0f0\"\nforeground = \"#202020\"\naccent = \"#004488\"\n";
+
+    struct ThemeFiles(PathBuf);
+
+    impl ThemeFiles {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("omarchy-theme-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+
+        fn write(&self, name: &str, source: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, source).unwrap();
+            path
+        }
+    }
+
+    impl Drop for ThemeFiles {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn live_palette_reloads_edits_and_keeps_last_good_colors_during_switches() {
+        let files = ThemeFiles::new();
+        let path = files.write("colors.toml", DARK);
+        let mut live = LivePalette::new(vec![path.clone()]);
+        let mut now = live.checked;
+        assert_eq!(live.palette.resolve(BG), Color32::from_rgb(16, 32, 48));
+
+        files.write("colors.toml", LIGHT);
+        assert_eq!(live.refresh(now), 0, "reads are throttled between checks");
+        now += THEME_CHECK_INTERVAL;
+        assert_eq!(live.refresh(now), 1);
+        assert_eq!(live.palette.resolve(BG), Color32::from_gray(240));
+
+        for source in [
+            "",
+            "background = \"#000000\"\n",
+            "background = \"#broken\"\nforeground = \"#ffffff\"\n",
+        ] {
+            files.write("colors.toml", source);
+            now += THEME_CHECK_INTERVAL;
+            assert_eq!(live.refresh(now), 1);
+            assert_eq!(live.palette.resolve(BG), Color32::from_gray(240));
+        }
+        std::fs::remove_file(&path).unwrap();
+        now += THEME_CHECK_INTERVAL;
+        assert_eq!(live.refresh(now), 1);
+        files.write("colors.toml", DARK);
+        now += THEME_CHECK_INTERVAL;
+        assert_eq!(live.refresh(now), 2, "recovers without restarting");
+        now += THEME_CHECK_INTERVAL;
+        assert_eq!(live.refresh(now), 2, "unchanged palette keeps its revision");
+    }
+
+    #[test]
+    fn live_palette_detects_theme_created_after_startup_and_respects_path_priority() {
+        let files = ThemeFiles::new();
+        let state = files.0.join("state.toml");
+        let config = files.0.join("config.toml");
+        let mut live = LivePalette::new(vec![state, config]);
+        assert_eq!(live.palette.resolve(BG), BG);
+
+        files.write("config.toml", LIGHT);
+        let now = live.checked + THEME_CHECK_INTERVAL;
+        assert_eq!(live.refresh(now), 1);
+        assert_eq!(live.palette.resolve(BG), Color32::from_gray(240));
+
+        files.write("state.toml", DARK);
+        assert_eq!(live.refresh(now + THEME_CHECK_INTERVAL), 2);
+        assert_eq!(live.palette.resolve(BG), Color32::from_rgb(16, 32, 48));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_palette_follows_replaced_current_theme_symlink() {
+        let files = ThemeFiles::new();
+        for (name, source) in [("dark", DARK), ("light", LIGHT)] {
+            std::fs::create_dir(files.0.join(name)).unwrap();
+            files.write(&format!("{name}/colors.toml"), source);
+        }
+        let current = files.0.join("current");
+        std::os::unix::fs::symlink(files.0.join("dark"), &current).unwrap();
+        let mut live = LivePalette::new(vec![current.join("colors.toml")]);
+        // Switch atomically, just as a theme manager can replace a symlink.
+        let next = files.0.join("next");
+        std::os::unix::fs::symlink(files.0.join("light"), &next).unwrap();
+        std::fs::rename(next, current).unwrap();
+        assert_eq!(live.refresh(live.checked + THEME_CHECK_INTERVAL), 1);
+        assert_eq!(live.palette.resolve(BG), Color32::from_gray(240));
+    }
+
+    #[test]
+    fn idle_windows_refresh_styles_and_semantic_colors_on_the_next_pass() {
+        // Scope the source to this test's UI thread, without changing HOME/XDG
+        // or the palette used by any tests running concurrently.
+        struct RestorePalette(Option<LivePalette>);
+        impl Drop for RestorePalette {
+            fn drop(&mut self) {
+                PALETTE.with(|palette| *palette.borrow_mut() = self.0.take().unwrap());
+            }
+        }
+        let files = ThemeFiles::new();
+        let path = files.write("colors.toml", DARK);
+        let _restore = RestorePalette(Some(
+            PALETTE.with(|palette| palette.replace(LivePalette::new(vec![path]))),
+        ));
+        let windows = [egui::Context::default(), egui::Context::default()];
+        for ctx in &windows {
+            configure(ctx);
+            configure(ctx); // Reconfiguration must not add duplicate callbacks.
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                assert_eq!(ui.visuals().panel_fill, color(BG));
+            });
+            assert!(
+                output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+                    <= THEME_CHECK_INTERVAL
+            );
+        }
+
+        files.write("colors.toml", LIGHT);
+        PALETTE
+            .with(|palette| palette.borrow_mut().checked = Instant::now() - THEME_CHECK_INTERVAL);
+        for ctx in &windows {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                assert_eq!(color(BG), Color32::from_gray(240));
+                assert_eq!(ui.visuals().panel_fill, color(BG));
+                assert_eq!(ui.visuals().override_text_color, Some(color(TEXT)));
+                ui.scope(|child| {
+                    assert_eq!(
+                        child.visuals().widgets.hovered.bg_stroke.color,
+                        color(ACCENT)
+                    );
+                    assert_eq!(
+                        child.visuals().widgets.inactive.fg_stroke.color,
+                        color(TEXT)
+                    );
+                });
+            });
+            assert_eq!(
+                ctx.style_of(egui::Theme::Dark).visuals.panel_fill,
+                color(BG)
+            );
+        }
+        let new_window = egui::Context::default();
+        configure(&new_window);
+        assert_eq!(
+            new_window.style_of(egui::Theme::Dark).visuals.panel_fill,
+            Color32::from_gray(240)
+        );
+    }
 
     #[test]
     fn bold_labels_and_primary_buttons_keep_readable_contrast() {

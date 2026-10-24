@@ -6,7 +6,7 @@
 
 pkgname=omarchyuu-git
 _pkgname=omarchyuu
-pkgver=0.1.0.r1.g0000000
+pkgver=0.1.1.r1.g0000000
 pkgrel=1
 pkgdesc="UU Remote desktop for Omarchy (X11 and Wayland)"
 arch=('x86_64')

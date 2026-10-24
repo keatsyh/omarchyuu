@@ -14,7 +14,7 @@
 - **远程协助**：同账号设备直连、协助码与验证码连接、邀请链接接入。
 - **文件管理**：主控端独立双栏文件管理器（支持双向浏览、上传与下载）。
 - **音频与终端**：被控端桌面声音监听、仅音频连接、本机终端与 UU 手机端终端。
-- **系统集成**：TCP / UDP 端口转发、Omarchy 主题自适应、系统托盘、开机自启。
+- **系统集成**：TCP / UDP 端口转发、Omarchy 主题实时跟随（运行中切换主题无需重启）、系统托盘、开机自启。
 
 ### 暂不支持或受限
 
@@ -58,8 +58,8 @@ paru -S omarchyuu-bin
 从 [Releases](https://github.com/keatsyh/omarchyuu/releases/latest) 下载 Linux 归档，解压后运行：
 
 ```bash
-tar --zstd -xf omarchyuu-0.1.0-x86_64-linux.tar.zst
-cd omarchyuu-0.1.0-x86_64-linux
+tar --zstd -xf omarchyuu-0.1.1-x86_64-linux.tar.zst
+cd omarchyuu-0.1.1-x86_64-linux
 ./install-omarchy.sh
 ```
 

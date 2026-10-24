@@ -1,6 +1,6 @@
 [package]
 name = "omarchyuu"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Omarchy desktop client for UU Remote"
 license-file = "LICENSE"
