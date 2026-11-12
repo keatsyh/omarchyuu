@@ -59,8 +59,8 @@ paru -S omarchyuu-bin
 从 [Releases](https://github.com/keatsyh/omarchyuu/releases/latest) 下载 Linux 归档，解压后运行：
 
 ```bash
-tar --zstd -xf omarchyuu-0.1.1-x86_64-linux.tar.zst
-cd omarchyuu-0.1.1-x86_64-linux
+tar --zstd -xf omarchyuu-0.1.2-x86_64-linux.tar.zst
+cd omarchyuu-0.1.2-x86_64-linux
 ./install-omarchy.sh
 ```
 
