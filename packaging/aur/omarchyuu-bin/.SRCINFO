@@ -1,6 +1,6 @@
 pkgbase = omarchyuu-bin
 	pkgdesc = UU Remote desktop for Omarchy (X11 and Wayland)
-	pkgver = 0.1.1
+	pkgver = 0.1.2
 	pkgrel = 1
 	url = https://github.com/keatsyh/omarchyuu
 	install = omarchyuu-bin.install
@@ -41,7 +41,7 @@ pkgbase = omarchyuu-bin
 	conflicts = openuuyc-bin
 	conflicts = openuuyc-git
 	options = !debug
-	source = https://github.com/keatsyh/omarchyuu/releases/download/v0.1.1/omarchyuu-0.1.1-x86_64-linux.tar.zst
-	sha256sums = 50c63ab5c3a5ac16249023f93aae2a61eb7a5e59f52e972f1c0a83e3d4c4f0a8
+	source = https://github.com/keatsyh/omarchyuu/releases/download/v0.1.2/omarchyuu-0.1.2-x86_64-linux.tar.zst
+	sha256sums = 6b2523220f5d24bab30e4cbe6fe2d2f6e197a4819b1c9d86cef4b9b40791a6e3
 
 pkgname = omarchyuu-bin

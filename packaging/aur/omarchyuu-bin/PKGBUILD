@@ -3,7 +3,7 @@
 # Prebuilt x86_64 release from https://github.com/keatsyh/omarchyuu.
 
 pkgname=omarchyuu-bin
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 # Independent omarchyuu releases use v<Cargo version>.
 _tag=v${pkgver//_/-}
@@ -37,7 +37,7 @@ install=omarchyuu-bin.install
 # mixes versions.
 _dir=omarchyuu-${_tag#v}-x86_64-linux
 source=("${url}/releases/download/${_tag}/${_dir}.tar.zst")
-sha256sums=('50c63ab5c3a5ac16249023f93aae2a61eb7a5e59f52e972f1c0a83e3d4c4f0a8')
+sha256sums=('6b2523220f5d24bab30e4cbe6fe2d2f6e197a4819b1c9d86cef4b9b40791a6e3')
 
 package() {
     cd "$srcdir/$_dir"
