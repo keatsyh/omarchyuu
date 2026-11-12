@@ -57,7 +57,7 @@ fn wake_display(session: Option<&Connection>) {
     // Omarchy/Hyprland may provide no ScreenSaver D-Bus service at all. Do
     // not put this behind successful idle inhibition: an off output then
     // accepts a screencopy request but never produces the first picture.
-    match wake_hyprland() {
+    match wake_hyprland(None) {
         Ok(true) => {
             woken.push("Hyprland DPMS");
             tracing::info!("capture requested Hyprland display wake");
@@ -90,7 +90,9 @@ fn wake_display(session: Option<&Connection>) {
     tracing::debug!(?woken, "capture display wake requested");
 }
 
-fn wake_hyprland() -> Result<bool> {
+/// Wake all outputs at capture startup, or just the output being captured
+/// when an active stream stalls.
+pub(super) fn wake_hyprland(output: Option<&str>) -> Result<bool> {
     let Some(signature) = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE") else {
         return Ok(false);
     };
@@ -99,7 +101,7 @@ fn wake_hyprland() -> Result<bool> {
         .join("hypr")
         .join(signature)
         .join(".socket.sock");
-    wake_hyprland_with(|command| {
+    wake_hyprland_with(output, |command| {
         use std::io::{Read as _, Write as _};
         let mut stream =
             std::os::unix::net::UnixStream::connect(&socket).context("连接 Hyprland IPC 失败")?;
@@ -114,22 +116,48 @@ fn wake_hyprland() -> Result<bool> {
     })
 }
 
-fn wake_hyprland_with(mut request: impl FnMut(&str) -> Result<String>) -> Result<bool> {
+fn wake_hyprland_with(
+    output: Option<&str>,
+    mut request: impl FnMut(&str) -> Result<String>,
+) -> Result<bool> {
     #[derive(serde::Deserialize)]
     struct Monitor {
+        name: Option<String>,
         #[serde(rename = "dpmsStatus")]
         powered: bool,
     }
+    // Connector names are identifiers in both Hyprland dispatcher syntaxes.
+    // Never interpolate arbitrary text from a Wayland output name into IPC.
+    if output.is_some_and(|name| {
+        name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+    }) {
+        return Ok(false);
+    }
     let monitors: Vec<Monitor> =
         serde_json::from_str(&request("j/monitors")?).context("无法读取 Hyprland 显示电源状态")?;
-    if monitors.iter().all(|monitor| monitor.powered) {
+    if !monitors.iter().any(|monitor| {
+        !monitor.powered && output.is_none_or(|name| monitor.name.as_deref() == Some(name))
+    }) {
         return Ok(false);
     }
     let mut failures = Vec::new();
     // Lua dispatchers and the earlier hyprlang configuration syntax.
     // Both operations only power displays on; neither unlocks the session.
-    for command in ["dispatch hl.dsp.dpms({action=\"on\"})", "dispatch dpms on"] {
-        match request(command) {
+    let commands = match output {
+        Some(name) => [
+            format!(r#"dispatch hl.dsp.dpms({{action="on",monitor="{name}"}})"#),
+            format!("dispatch dpms on {name}"),
+        ],
+        None => [
+            r#"dispatch hl.dsp.dpms({action="on"})"#.to_owned(),
+            "dispatch dpms on".to_owned(),
+        ],
+    };
+    for command in commands {
+        match request(&command) {
             Ok(reply) if reply.trim() == "ok" => return Ok(true),
             Ok(reply) => failures.push(reply.trim().to_owned()),
             Err(error) => failures.push(format!("{error:#}")),
@@ -255,7 +283,7 @@ mod tests {
         for legacy in [false, true] {
             let mut commands = Vec::new();
             assert!(
-                super::wake_hyprland_with(|command| {
+                super::wake_hyprland_with(None, |command| {
                     commands.push(command.to_owned());
                     Ok(match command {
                         "j/monitors" => r#"[{"dpmsStatus":true},{"dpmsStatus":false}]"#,
@@ -283,7 +311,7 @@ mod tests {
             r#"[{"name":"eDP-1"}]"#,
         ] {
             let mut calls = 0;
-            let result = super::wake_hyprland_with(|command| {
+            let result = super::wake_hyprland_with(None, |command| {
                 calls += 1;
                 assert_eq!(command, "j/monitors");
                 Ok(monitors.to_owned())
@@ -295,7 +323,7 @@ mod tests {
 
     #[test]
     fn hyprland_does_not_claim_wake_when_both_dispatchers_fail() {
-        let result = super::wake_hyprland_with(|command| {
+        let result = super::wake_hyprland_with(None, |command| {
             if command == "j/monitors" {
                 Ok(r#"[{"dpmsStatus":false}]"#.into())
             } else {
@@ -303,6 +331,25 @@ mod tests {
             }
         });
         assert!(result.unwrap_err().to_string().contains("拒绝唤醒"));
+    }
+
+    #[test]
+    fn hyprland_capture_recovery_wakes_only_the_selected_output() {
+        let monitors = r#"[{"name":"eDP-1","dpmsStatus":true},{"name":"DP-2","dpmsStatus":false}]"#;
+        for (name, expected) in [("eDP-1", false), ("DP-3", false), ("DP-2", true)] {
+            let mut dispatched = false;
+            let woke = super::wake_hyprland_with(Some(name), |command| match command {
+                "j/monitors" => Ok(monitors.into()),
+                r#"dispatch hl.dsp.dpms({action="on",monitor="DP-2"})"# => {
+                    dispatched = true;
+                    Ok("ok\n".into())
+                }
+                _ => panic!("unexpected IPC command: {command}"),
+            })
+            .unwrap();
+            assert_eq!(woke, expected);
+            assert_eq!(dispatched, expected);
+        }
     }
 
     /// Needs a desktop session bus. On GNOME, also checks the session

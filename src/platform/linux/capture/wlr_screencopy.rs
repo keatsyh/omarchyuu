@@ -47,6 +47,12 @@ const OUTPUT_VERSION: u32 = 4;
 /// refusal.
 const COPY_REFUSED: &str = "合成器拒绝了屏幕复制（输出可能已关闭）";
 
+// Omarchy can power off the output after locking, even if capture had already
+// woken it. Check only when capture stops producing pictures.
+const POWER_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+const POWER_WAKE_TIMEOUT: Duration = Duration::from_secs(2);
+const POWER_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
 /// One output the compositor offers to copy.
 struct Output {
     proxy: wl_output::WlOutput,
@@ -251,6 +257,51 @@ struct Session {
     state: State,
     cursor: bool,
     output: usize,
+    power: Option<DisplayPower>,
+}
+
+struct DisplayPower {
+    output: String,
+    check_at: Instant,
+    waking_until: Option<Instant>,
+    retry_at: Option<Instant>,
+}
+
+impl DisplayPower {
+    fn new(output: Option<&str>) -> Option<Self> {
+        std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+        Some(Self {
+            output: output?.to_owned(),
+            check_at: Instant::now() + POWER_CHECK_INTERVAL,
+            waking_until: None,
+            retry_at: None,
+        })
+    }
+
+    fn received_picture(&mut self) {
+        self.check_at = Instant::now() + POWER_CHECK_INTERVAL;
+        self.waking_until = None;
+        self.retry_at = None;
+    }
+
+    fn wake(&mut self, now: Instant, failed: bool) -> bool {
+        if !failed && now < self.check_at {
+            return false;
+        }
+        self.check_at = now + POWER_CHECK_INTERVAL;
+        match super::super::power_request::wake_hyprland(Some(&self.output)) {
+            Ok(true) => {
+                self.waking_until = Some(Instant::now() + POWER_WAKE_TIMEOUT);
+                tracing::debug!("woke a blanked Hyprland display during capture");
+                true
+            }
+            Ok(false) => false,
+            Err(error) => {
+                tracing::debug!(%error, "could not check or wake the Hyprland display");
+                false
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -305,6 +356,7 @@ impl Session {
         ensure!(state.shm.is_some(), "合成器没有提供 wl_shm");
         ensure!(!state.outputs.is_empty(), "合成器没有提供任何输出");
         let output = pick(&state.outputs, screen)?;
+        let power = DisplayPower::new(state.outputs[output].name.as_deref());
         tracing::info!(
             output = screen.device_name,
             mode = ?state.outputs[output].mode,
@@ -316,6 +368,7 @@ impl Session {
             state,
             cursor,
             output,
+            power,
         };
         grab.probe()?;
         Ok(grab)
@@ -390,12 +443,51 @@ impl Session {
                 // damage ahead of the first real forced snapshot.
                 self.request()?;
                 if let Some(picture) = picture {
+                    if let Some(power) = &mut self.power {
+                        power.received_picture();
+                    }
                     return Ok(Some(picture));
                 }
             }
-            if std::mem::take(&mut self.state.failed) {
-                self.request()?;
+            let failed = std::mem::take(&mut self.state.failed);
+            let now = Instant::now();
+            if let Some(power) = &mut self.power
+                && failed
+                && power.waking_until.is_some_and(|until| now < until)
+            {
+                // The compositor can refuse copies while the output powers
+                // up. Give it a bounded window to resume without dropping
+                // the video track or retrying in a tight loop.
+                power.retry_at = Some(now + POWER_RETRY_INTERVAL);
+                self.drop_frame();
+            } else if self
+                .power
+                .as_mut()
+                .is_some_and(|power| power.wake(now, failed))
+            {
+                // The old damage-only copy may have waited through DPMS
+                // blanking. Request a fresh lock-screen frame immediately.
+                self.snapshot()?;
+            } else if failed {
                 bail!("{COPY_REFUSED}");
+            }
+            if let Some(retry_at) = self.power.as_ref().and_then(|power| power.retry_at) {
+                let now = Instant::now();
+                if now < retry_at {
+                    self.wait(retry_at.min(deadline).saturating_duration_since(now))?;
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+            }
+            if self
+                .power
+                .as_mut()
+                .and_then(|power| power.retry_at.take())
+                .is_some()
+            {
+                self.snapshot()?;
             }
             if self.state.frame.is_none() {
                 self.request()?;
